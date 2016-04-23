@@ -5,7 +5,6 @@ from keras.layers.core import Activation, Flatten
 import keras.backend as K
 from AlphaGo.preprocessing.preprocessing import Preprocess
 from AlphaGo.util import flatten_idx
-import numpy as np
 import json
 
 
@@ -26,13 +25,10 @@ class CNNPolicy(object):
 	def _model_forward(self):
 		"""Construct a function using the current keras backend that, when given a batch
 		of inputs, simply processes them forward and returns the output
-
 		The output has size (batch x 361) for 19x19 boards (i.e. the output is a batch
 		of distributions over flattened boards. See AlphaGo.util#flatten_idx)
-
 		This is as opposed to model.compile(), which takes a loss function
 		and training method.
-
 		c.f. https://github.com/fchollet/keras/issues/1426
 		"""
 		forward_function = K.function([self.model.input], [self.model.output])
@@ -41,59 +37,36 @@ class CNNPolicy(object):
 		# the first [0] gets the front tensor.
 		return lambda inpt: forward_function([inpt])[0]
 
-	def _select_moves_and_normalize(self, nn_output, moves, size):
-		"""helper function to normalize a distribution over the given list of moves
-		and return a list of (move, prob) tuples
+	def batch_eval_state(self, state_gen, batch=16):
+		"""Given a stream of states in state_gen, evaluates them in batches
+		to make best use of GPU resources.
+		Returns: TBD (stream of results? that would break zip().
+			streaming pairs of pre-zipped (state, result)?)
 		"""
-		if len(moves) == 0:
-			return []
-		move_indices = [flatten_idx(m, size) for m in moves]
-		# get network activations at legal move locations
-		distribution = nn_output[move_indices]
-		distribution = distribution / distribution.sum()
-		return zip(moves, distribution)
-
-	def batch_eval_state(self, states, moves_lists=None):
-		"""Given a list of states, evaluates them all at once to make best use of GPU
-		batching capabilities.
-
-		Analogous to [eval_state(s) for s in states]
-
-		Returns: a parallel list of move distributions as in eval_state
-		"""
-		n_states = len(states)
-		if n_states == 0:
-			return []
-		state_size = states[0].size
-		if not all([st.size == state_size for st in states]):
-			raise ValueError("all states must have the same size")
-		# concatenate together all one-hot encoded states along the 'batch' dimension
-		nn_input = np.concatenate([self.preprocessor.state_to_tensor(s) for s in states], axis=0)
-		# pass all input through the network at once (backend makes use of batches if len(states) is large)
-		network_output = self.forward(nn_input)
-		# default move lists to all legal moves
-		moves_lists = moves_lists or [st.get_legal_moves() for st in states]
-		results = [None] * n_states
-		for i in range(n_states):
-			results[i] = self._select_moves_and_normalize(network_output[i], moves_lists[i], state_size)
-		return results
+		raise NotImplementedError()
 
 	def eval_state(self, state, moves=None):
 		"""Given a GameState object, returns a list of (action, probability) pairs
 		according to the network outputs
-
 		If a list of moves is specified, only those moves are kept in the distribution
 		"""
 		tensor = self.preprocessor.state_to_tensor(state)
+
 		# run the tensor through the network
 		network_output = self.forward(tensor)
+
 		moves = moves or state.get_legal_moves()
-		return self._select_moves_and_normalize(network_output[0], moves, state.size)
+		move_indices = [flatten_idx(m, state.size) for m in moves]
+
+		# get network activations at legal move locations
+		# note: may not be a proper distribution by ignoring illegal moves
+		distribution = network_output[0][move_indices]
+		distribution = distribution / distribution.sum()
+		return zip(moves, distribution)
 
 	@staticmethod
 	def create_network(**kwargs):
 		"""construct a convolutional neural network.
-
 		Keword Arguments:
 		- input_dim:         	depth of features to be processed by first layer (no default)
 		- board:             	width of the go board to be processed (default 19)
